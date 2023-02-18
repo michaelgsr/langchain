@@ -1,41 +1,41 @@
 """Wrapper around HuggingFace APIs."""
+import os
 from typing import Any, Dict, List, Mapping, Optional
 
 from pydantic import BaseModel, Extra, root_validator
 
-from langchain.llms.base import LLM
+from langchain.llms.base import LLM, CompletionOutput
 from langchain.llms.utils import enforce_stop_tokens
-from langchain.utils import get_from_dict_or_env
 
 DEFAULT_REPO_ID = "gpt2"
-VALID_TASKS = ("text2text-generation", "text-generation")
 
 
-class HuggingFaceHub(LLM, BaseModel):
+class HuggingFaceHub(BaseModel, LLM):
     """Wrapper around HuggingFaceHub  models.
 
     To use, you should have the ``huggingface_hub`` python package installed, and the
-    environment variable ``HUGGINGFACEHUB_API_TOKEN`` set with your API token, or pass
-    it as a named parameter to the constructor.
+    environment variable ``HUGGINGFACEHUB_API_TOKEN`` set with your API token.
 
-    Only supports `text-generation` and `text2text-generation` for now.
+    Only supports task `text-generation` for now.
 
     Example:
         .. code-block:: python
 
-            from langchain import HuggingFaceHub
-            hf = HuggingFaceHub(repo_id="gpt2", huggingfacehub_api_token="my-api-key")
+            from langchain import HuggingFace
+            hf = HuggingFace(model="text-davinci-002")
     """
 
     client: Any  #: :meta private:
     repo_id: str = DEFAULT_REPO_ID
     """Model name to use."""
-    task: Optional[str] = None
-    """Task to call the model with. Should be a task that returns `generated_text`."""
-    model_kwargs: Optional[dict] = None
-    """Key word arguments to pass to the model."""
-
-    huggingfacehub_api_token: Optional[str] = None
+    temperature: float = 0.7
+    """What sampling temperature to use."""
+    max_new_tokens: int = 200
+    """The maximum number of tokens to generate in the completion."""
+    top_p: int = 1
+    """Total probability mass of tokens to consider at each step."""
+    num_return_sequences: int = 1
+    """How many completions to generate for each prompt."""
 
     class Config:
         """Configuration for this pydantic object."""
@@ -45,24 +45,20 @@ class HuggingFaceHub(LLM, BaseModel):
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
-        huggingfacehub_api_token = get_from_dict_or_env(
-            values, "huggingfacehub_api_token", "HUGGINGFACEHUB_API_TOKEN"
-        )
+        if "HUGGINGFACEHUB_API_TOKEN" not in os.environ:
+            raise ValueError(
+                "Did not find HuggingFace API token, please add an environment variable"
+                " `HUGGINGFACEHUB_API_TOKEN` which contains it."
+            )
         try:
             from huggingface_hub.inference_api import InferenceApi
 
-            repo_id = values["repo_id"]
-            client = InferenceApi(
+            repo_id = values.get("repo_id", DEFAULT_REPO_ID)
+            values["client"] = InferenceApi(
                 repo_id=repo_id,
-                token=huggingfacehub_api_token,
-                task=values.get("task"),
+                token=os.environ["HUGGINGFACEHUB_API_TOKEN"],
+                task="text-generation",
             )
-            if client.task not in VALID_TASKS:
-                raise ValueError(
-                    f"Got invalid task {client.task}, "
-                    f"currently only {VALID_TASKS} are supported"
-                )
-            values["client"] = client
         except ImportError:
             raise ValueError(
                 "Could not import huggingface_hub python package. "
@@ -71,20 +67,24 @@ class HuggingFaceHub(LLM, BaseModel):
         return values
 
     @property
-    def _identifying_params(self) -> Mapping[str, Any]:
-        """Get the identifying parameters."""
-        _model_kwargs = self.model_kwargs or {}
+    def _default_params(self) -> Mapping[str, Any]:
+        """Get the default parameters for calling HuggingFace Hub API."""
+        # Convert temperature from [0, 1] to [1, 100] so 0 maps to 1 and 1 maps to 100.
+        temperature = self.temperature
+        if 0.0 <= temperature <= 1.0:
+            temperature = 1.0 + (temperature * 99.0)
+        # TODO: Add support for returning logprobs once added to the API.
         return {
-            **{"repo_id": self.repo_id, "task": self.task},
-            **{"model_kwargs": _model_kwargs},
+            "temperature": temperature,
+            "max_new_tokens": self.max_new_tokens,
+            "top_p": self.top_p,
+            "num_return_sequences": self.num_return_sequences,
+            "return_full_text": False,
         }
 
-    @property
-    def _llm_type(self) -> str:
-        """Return type of llm."""
-        return "huggingface_hub"
-
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def generate(
+        self, prompt: str, stop: Optional[List[str]] = None
+    ) -> List[CompletionOutput]:
         """Call out to HuggingFace Hub's inference endpoint.
 
         Args:
@@ -99,22 +99,17 @@ class HuggingFaceHub(LLM, BaseModel):
 
                 response = hf("Tell me a joke.")
         """
-        _model_kwargs = self.model_kwargs or {}
-        response = self.client(inputs=prompt, params=_model_kwargs)
+        response = self.client(inputs=prompt, params=self._default_params)
         if "error" in response:
             raise ValueError(f"Error raised by inference API: {response['error']}")
-        if self.client.task == "text-generation":
-            # Text generation return includes the starter text.
-            text = response[0]["generated_text"][len(prompt) :]
-        elif self.client.task == "text2text-generation":
-            text = response[0]["generated_text"]
-        else:
-            raise ValueError(
-                f"Got invalid task {self.client.task}, "
-                f"currently only {VALID_TASKS} are supported"
-            )
         if stop is not None:
-            # This is a bit hacky, but I can't figure out a better way to enforce
-            # stop tokens when making calls to huggingface_hub.
-            text = enforce_stop_tokens(text, stop)
-        return text
+            return []
+        results = []
+        for result in response:
+            text = result["generated_text"]
+            if stop is not None:
+                # This is a bit hacky, but I can't figure out a better way to enforce
+                # stop tokens when making calls to huggingface_hub.
+                text = enforce_stop_tokens(text, stop)
+            results.append(CompletionOutput(text=text))
+        return results

@@ -1,30 +1,21 @@
 """Fake LLM wrapper for testing purposes."""
-from typing import Any, List, Mapping, Optional
+from typing import List, Mapping, Optional
 
-from pydantic import BaseModel
-
-from langchain.llms.base import LLM
+from langchain.llms.base import LLM, CompletionOutput
 
 
-class FakeLLM(LLM, BaseModel):
+class FakeLLM(LLM):
     """Fake LLM wrapper for testing purposes."""
 
-    queries: Optional[Mapping] = None
+    def __init__(self, queries: Optional[Mapping] = None):
+        """Initialize with optional lookup of queries."""
+        self._queries = queries
 
-    @property
-    def _llm_type(self) -> str:
-        """Return type of llm."""
-        return "fake"
-
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def generate(self, prompt: str, stop: Optional[List[str]] = None) -> List[CompletionOutput]:
         """First try to lookup in queries, else return 'foo' or 'bar'."""
-        if self.queries is not None:
-            return self.queries[prompt]
+        if self._queries is not None:
+            return [CompletionOutput(text=self._queries[prompt])]
         if stop is None:
-            return "foo"
+            return [CompletionOutput(text="foo")]
         else:
-            return "bar"
-
-    @property
-    def _identifying_params(self) -> Mapping[str, Any]:
-        return {}
+            return [CompletionOutput(text="bar")]

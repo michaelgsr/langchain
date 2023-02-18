@@ -1,31 +1,20 @@
 """Test functionality related to natbot."""
 
-from typing import Any, List, Mapping, Optional
-
-from pydantic import BaseModel
+from typing import List, Optional
 
 from langchain.chains.natbot.base import NatBotChain
-from langchain.llms.base import LLM
+from langchain.llms.base import LLM, CompletionOutput
 
 
-class FakeLLM(LLM, BaseModel):
+class FakeLLM(LLM):
     """Fake LLM wrapper for testing purposes."""
 
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def generate(self, prompt: str, stop: Optional[List[str]] = None) -> List[CompletionOutput]:
         """Return `foo` if longer than 10000 words, else `bar`."""
         if len(prompt) > 10000:
-            return "foo"
+            return [CompletionOutput(text="foo")]
         else:
-            return "bar"
-
-    @property
-    def _llm_type(self) -> str:
-        """Return type of llm."""
-        return "fake"
-
-    @property
-    def _identifying_params(self) -> Mapping[str, Any]:
-        return {}
+            return [CompletionOutput(text="bar")]
 
 
 def test_proper_inputs() -> None:
@@ -33,7 +22,7 @@ def test_proper_inputs() -> None:
     nat_bot_chain = NatBotChain(llm=FakeLLM(), objective="testing")
     url = "foo" * 10000
     browser_content = "foo" * 10000
-    output = nat_bot_chain.execute(url, browser_content)
+    output = nat_bot_chain.run(url, browser_content)
     assert output == "bar"
 
 
@@ -46,5 +35,5 @@ def test_variable_key_naming() -> None:
         input_browser_content_key="b",
         output_key="c",
     )
-    output = nat_bot_chain.execute("foo", "foo")
+    output = nat_bot_chain.run("foo", "foo")
     assert output == "bar"

@@ -1,32 +1,28 @@
 """Wrapper around Cohere APIs."""
-import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Extra, root_validator
 
-from langchain.llms.base import LLM
+from langchain.llms.base import LLM, CompletionOutput
 from langchain.llms.utils import enforce_stop_tokens
-from langchain.utils import get_from_dict_or_env
-
-logger = logging.getLogger(__name__)
 
 
-class Cohere(LLM, BaseModel):
+class Cohere(BaseModel, LLM):
     """Wrapper around Cohere large language models.
 
     To use, you should have the ``cohere`` python package installed, and the
-    environment variable ``COHERE_API_KEY`` set with your API key, or pass
-    it as a named parameter to the constructor.
+    environment variable ``COHERE_API_KEY`` set with your API key.
 
     Example:
         .. code-block:: python
 
             from langchain import Cohere
-            cohere = Cohere(model="gptd-instruct-tft", cohere_api_key="my-api-key")
+            cohere = Cohere(model="small")
     """
 
     client: Any  #: :meta private:
-    model: Optional[str] = None
+    model: str = "small"
     """Model name to use."""
 
     max_tokens: int = 256
@@ -47,9 +43,11 @@ class Cohere(LLM, BaseModel):
     presence_penalty: int = 0
     """Penalizes repeated tokens."""
 
-    cohere_api_key: Optional[str] = None
+    num_generations: int = 1
+    """Number of generations to return."""
 
-    stop: Optional[List[str]] = None
+    return_likelihoods: bool = True
+    """Whether to return the likelihoods of the generated tokens."""
 
     class Config:
         """Configuration for this pydantic object."""
@@ -59,13 +57,15 @@ class Cohere(LLM, BaseModel):
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
         """Validate that api key and python package exists in environment."""
-        cohere_api_key = get_from_dict_or_env(
-            values, "cohere_api_key", "COHERE_API_KEY"
-        )
+        if "COHERE_API_KEY" not in os.environ:
+            raise ValueError(
+                "Did not find Cohere API key, please add an environment variable"
+                " `COHERE_API_KEY` which contains it."
+            )
         try:
             import cohere
 
-            values["client"] = cohere.Client(cohere_api_key)
+            values["client"] = cohere.Client(os.environ["COHERE_API_KEY"])
         except ImportError:
             raise ValueError(
                 "Could not import cohere python package. "
@@ -73,29 +73,7 @@ class Cohere(LLM, BaseModel):
             )
         return values
 
-    @property
-    def _default_params(self) -> Dict[str, Any]:
-        """Get the default parameters for calling Cohere API."""
-        return {
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "k": self.k,
-            "p": self.p,
-            "frequency_penalty": self.frequency_penalty,
-            "presence_penalty": self.presence_penalty,
-        }
-
-    @property
-    def _identifying_params(self) -> Dict[str, Any]:
-        """Get the identifying parameters."""
-        return {**{"model": self.model}, **self._default_params}
-
-    @property
-    def _llm_type(self) -> str:
-        """Return type of llm."""
-        return "cohere"
-
-    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+    def generate(self, prompt: str, stop: Optional[List[str]] = None) -> List[CompletionOutput]:
         """Call out to Cohere's generate endpoint.
 
         Args:
@@ -110,18 +88,32 @@ class Cohere(LLM, BaseModel):
 
                 response = cohere("Tell me a joke.")
         """
-        params = self._default_params
-        if self.stop is not None and stop is not None:
-            raise ValueError("`stop` found in both the input and default params.")
-        elif self.stop is not None:
-            params["stop_sequences"] = self.stop
-        else:
-            params["stop_sequences"] = stop
-
-        response = self.client.generate(model=self.model, prompt=prompt, **params)
-        text = response.generations[0].text
-        # If stop tokens are provided, Cohere's endpoint returns them.
-        # In order to make this consistent with other endpoints, we strip them.
-        if stop is not None or self.stop is not None:
-            text = enforce_stop_tokens(text, params["stop_sequences"])
-        return text
+        response = self.client.generate(
+            model=self.model,
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            k=self.k,
+            p=self.p,
+            frequency_penalty=self.frequency_penalty,
+            presence_penalty=self.presence_penalty,
+            stop_sequences=stop,
+            num_generations=self.num_generations,
+            return_likelihoods="GENERATION" if self.return_likelihoods else None,
+        )
+        results = []
+        for generation in response.generations:
+            txt = generation.text
+            if stop is not None:
+                # If stop tokens are provided, Cohere's endpoint returns them.
+                # In order to make this consistent with other endpoints, we strip them.
+                txt = enforce_stop_tokens(txt, stop)
+            N = len(generation.token_likelihoods)
+            logprobs = [token.likelihood / N for token in generation.token_likelihoods]
+            results.append(
+                CompletionOutput(
+                    text=txt,
+                    logprobs=logprobs,
+                )
+            )
+        return results

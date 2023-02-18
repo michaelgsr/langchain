@@ -1,14 +1,14 @@
 """Chain that just formats a prompt and calls an LLM."""
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from collections import defaultdict
+import math
+from typing import Any, Callable, Dict, List, Tuple
 
 from pydantic import BaseModel, Extra
 
 from langchain.chains.base import Chain
-from langchain.input import get_colored_text
-from langchain.llms.base import BaseLLM
-from langchain.prompts.base import BasePromptTemplate
-from langchain.prompts.prompt import PromptTemplate
-from langchain.schema import LLMResult
+from langchain.llms.base import LLM
+from langchain.prompt import Prompt
+import re
 
 
 class LLMChain(Chain, BaseModel):
@@ -17,17 +17,15 @@ class LLMChain(Chain, BaseModel):
     Example:
         .. code-block:: python
 
-            from langchain import LLMChain, OpenAI, PromptTemplate
+            from langchain import LLMChain, OpenAI, Prompt
             prompt_template = "Tell me a {adjective} joke"
-            prompt = PromptTemplate(
-                input_variables=["adjective"], template=prompt_template
-            )
+            prompt = Prompt(input_variables=["adjective"], template=prompt_template)
             llm = LLMChain(llm=OpenAI(), prompt=prompt)
     """
 
-    prompt: BasePromptTemplate
+    prompt: Prompt
     """Prompt object to use."""
-    llm: BaseLLM
+    llm: LLM
     """LLM wrapper to use."""
     output_key: str = "text"  #: :meta private:
 
@@ -53,89 +51,15 @@ class LLMChain(Chain, BaseModel):
         """
         return [self.output_key]
 
-    def generate(self, input_list: List[Dict[str, Any]]) -> LLMResult:
-        """Generate LLM result from inputs."""
-        prompts, stop = self.prep_prompts(input_list)
-        response = self.llm.generate(prompts, stop=stop)
-        return response
+    def _run(self, inputs: Dict[str, Any]) -> Dict[str, str]:
+        selected_inputs = {k: inputs[k] for k in self.prompt.input_variables}
+        prompt = self.prompt.format(**selected_inputs)
 
-    async def agenerate(self, input_list: List[Dict[str, Any]]) -> LLMResult:
-        """Generate LLM result from inputs."""
-        prompts, stop = await self.aprep_prompts(input_list)
-        response = await self.llm.agenerate(prompts, stop=stop)
-        return response
-
-    def prep_prompts(
-        self, input_list: List[Dict[str, Any]]
-    ) -> Tuple[List[str], Optional[List[str]]]:
-        """Prepare prompts from inputs."""
-        stop = None
-        if "stop" in input_list[0]:
-            stop = input_list[0]["stop"]
-        prompts = []
-        for inputs in input_list:
-            selected_inputs = {k: inputs[k] for k in self.prompt.input_variables}
-            prompt = self.prompt.format(**selected_inputs)
-            _colored_text = get_colored_text(prompt, "green")
-            _text = "Prompt after formatting:\n" + _colored_text
-            self.callback_manager.on_text(_text, end="\n", verbose=self.verbose)
-            if "stop" in inputs and inputs["stop"] != stop:
-                raise ValueError(
-                    "If `stop` is present in any inputs, should be present in all."
-                )
-            prompts.append(prompt)
-        return prompts, stop
-
-    async def aprep_prompts(
-        self, input_list: List[Dict[str, Any]]
-    ) -> Tuple[List[str], Optional[List[str]]]:
-        """Prepare prompts from inputs."""
-        stop = None
-        if "stop" in input_list[0]:
-            stop = input_list[0]["stop"]
-        prompts = []
-        for inputs in input_list:
-            selected_inputs = {k: inputs[k] for k in self.prompt.input_variables}
-            prompt = self.prompt.format(**selected_inputs)
-            _colored_text = get_colored_text(prompt, "green")
-            _text = "Prompt after formatting:\n" + _colored_text
-            if self.callback_manager.is_async:
-                await self.callback_manager.on_text(
-                    _text, end="\n", verbose=self.verbose
-                )
-            else:
-                self.callback_manager.on_text(_text, end="\n", verbose=self.verbose)
-            if "stop" in inputs and inputs["stop"] != stop:
-                raise ValueError(
-                    "If `stop` is present in any inputs, should be present in all."
-                )
-            prompts.append(prompt)
-        return prompts, stop
-
-    def apply(self, input_list: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """Utilize the LLM generate method for speed gains."""
-        response = self.generate(input_list)
-        return self.create_outputs(response)
-
-    async def aapply(self, input_list: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """Utilize the LLM generate method for speed gains."""
-        response = await self.agenerate(input_list)
-        return self.create_outputs(response)
-
-    def create_outputs(self, response: LLMResult) -> List[Dict[str, str]]:
-        """Create outputs from response."""
-        outputs = []
-        for generation in response.generations:
-            # Get the text of the top generated string.
-            response_str = generation[0].text
-            outputs.append({self.output_key: response_str})
-        return outputs
-
-    def _call(self, inputs: Dict[str, Any]) -> Dict[str, str]:
-        return self.apply([inputs])[0]
-
-    async def _acall(self, inputs: Dict[str, Any]) -> Dict[str, str]:
-        return (await self.aapply([inputs]))[0]
+        kwargs = {}
+        if "stop" in inputs:
+            kwargs["stop"] = inputs["stop"]
+        response = self.llm(prompt, **kwargs)
+        return {self.output_key: response}
 
     def predict(self, **kwargs: Any) -> str:
         """Format prompt with kwargs and pass to LLM.
@@ -153,62 +77,89 @@ class LLMChain(Chain, BaseModel):
         """
         return self(kwargs)[self.output_key]
 
-    async def apredict(self, **kwargs: Any) -> str:
-        """Format prompt with kwargs and pass to LLM.
 
-        Args:
-            **kwargs: Keys to pass to prompt template.
+class ChainOfThoughtParser(BaseModel):
+    """Parser to separate the reasoning steps from the answer."""
 
-        Returns:
-            Completion from LLM.
+    reasoning_parser: Callable[[str], str]
+    """Function to parse the reasoning steps from the generated text."""
+    answer_parser: Callable[[str], str]
+    """Function to parse the answer from the generated text."""
 
-        Example:
-            .. code-block:: python
+    def parse_completion(self, text: str) -> Tuple[str, str]:
+        """Parse the reasoning steps and answer from the completion."""
+        reasoning = self.reasoning_parser(text)
+        answer = self.answer_parser(text)
+        return reasoning, answer
 
-                completion = llm.predict(adjective="funny")
-        """
-        return (await self.acall(kwargs))[self.output_key]
 
-    def predict_and_parse(self, **kwargs: Any) -> Union[str, List[str], Dict[str, str]]:
-        """Call predict and then parse the results."""
-        result = self.predict(**kwargs)
-        if self.prompt.output_parser is not None:
-            return self.prompt.output_parser.parse(result)
+# Default parser returns the string preceding "The answer is" (case invariant) as the reasoning
+# and the string following as the answer.
+
+_UNKNOWN_ANSWER = "I don't know."
+
+def _default_answer_parser(text: str) -> str:
+    """Default answer parser."""
+    try:
+        # Use re to split the text along "The answer is" (case invariant) and return the second
+        # element of the resulting list.
+        return re.split(r"(?i)the\sanswer\sis", text)[1].strip()
+    except IndexError:
+        return _UNKNOWN_ANSWER
+
+
+def _default_reasoning_parser(text: str) -> str:
+    """Default reasoning parser."""
+    try:
+        return re.split(r"(?i)the\sanswer\sis", text)[0].strip()
+    except IndexError:
+        return text
+
+
+DEFAULT_CHAIN_OF_THOUGHT_PARSER = ChainOfThoughtParser(
+    reasoning_parser=_default_reasoning_parser, answer_parser=_default_answer_parser
+)
+
+
+class SelfConsistencyLLMChain(LLMChain, BaseModel):
+    """LLM Chain that uses self-consistency to improve the reliability of its outputs."""
+
+    parser: ChainOfThoughtParser = DEFAULT_CHAIN_OF_THOUGHT_PARSER
+    """Parser to separate the reasoning steps from the answer."""
+    max_iterations: int = 5
+    """Maximum number of iterations to run."""
+    normalize_probs: bool = True
+
+    def _run(self, inputs: Dict[str, Any]) -> Dict[str, str]:
+        """Run the chain."""
+        selected_inputs = {k: inputs[k] for k in self.prompt.input_variables}
+        prompt = self.prompt.format(**selected_inputs)
+
+        kwargs = {}
+        if "stop" in inputs:
+            kwargs["stop"] = inputs["stop"]
+        answers = defaultdict(float)
+        responses = defaultdict(list)
+        n = 0
+        while n < self.max_iterations:
+            _responses = self.llm.generate(prompt, **kwargs)
+            for response in _responses:
+                reasoning, answer = self.parser.parse_completion(response.text)
+                if response.logprobs is not None:
+                    total_logprob = sum(response.logprobs)
+                    if self.normalize_probs:
+                        total_logprob /= len(response.logprobs)
+                    generated_prob = math.exp(total_logprob)
+                else:
+                    generated_prob = 1.0
+                answers[answer] += generated_prob
+                responses[answer].append((reasoning, answer, generated_prob))
+                n += 1
+        answer = max(answers, key=answers.get)
+        sorted_answers = sorted(responses[answer], key=lambda x: x[2], reverse=True)
+        if answer == _UNKNOWN_ANSWER:
+            # If the model doesn't know, output the related reasoning steps.
+            flipped_response = sorted_answers[0][0]
         else:
-            return result
-
-    def apply_and_parse(
-        self, input_list: List[Dict[str, Any]]
-    ) -> Sequence[Union[str, List[str], Dict[str, str]]]:
-        """Call apply and then parse the results."""
-        result = self.apply(input_list)
-        return self._parse_result(result)
-
-    def _parse_result(
-        self, result: List[Dict[str, str]]
-    ) -> Sequence[Union[str, List[str], Dict[str, str]]]:
-        if self.prompt.output_parser is not None:
-            new_result = []
-            for res in result:
-                text = res[self.output_key]
-                new_result.append(self.prompt.output_parser.parse(text))
-            return new_result
-        else:
-            return result
-
-    async def aapply_and_parse(
-        self, input_list: List[Dict[str, Any]]
-    ) -> Sequence[Union[str, List[str], Dict[str, str]]]:
-        """Call apply and then parse the results."""
-        result = await self.aapply(input_list)
-        return self._parse_result(result)
-
-    @property
-    def _chain_type(self) -> str:
-        return "llm_chain"
-
-    @classmethod
-    def from_string(cls, llm: BaseLLM, template: str) -> Chain:
-        """Create LLMChain from LLM and template."""
-        prompt_template = PromptTemplate.from_template(template)
-        return cls(llm=llm, prompt=prompt_template)
+            flipped_response = answer
+        return {self.output_key: flipped_response}
