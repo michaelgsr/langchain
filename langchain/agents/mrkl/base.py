@@ -1,18 +1,15 @@
 """Attempt to implement MRKL systems as described in arxiv.org/pdf/2205.00445.pdf."""
 from __future__ import annotations
 
-import re
 from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
-from langchain.agents.agent import Agent, AgentExecutor
+from langchain.agents.agent import Agent, AgentWithTools
 from langchain.agents.mrkl.prompt import FORMAT_INSTRUCTIONS, PREFIX, SUFFIX
 from langchain.agents.tools import Tool
-from langchain.callbacks.base import BaseCallbackManager
-from langchain.chains import LLMChain
-from langchain.llms.base import BaseLLM
+from langchain.llms.base import LLM
 from langchain.prompts import PromptTemplate
 
-FINAL_ANSWER_ACTION = "Final Answer:"
+FINAL_ANSWER_ACTION = "Final Answer: "
 
 
 class ChainConfig(NamedTuple):
@@ -30,31 +27,28 @@ class ChainConfig(NamedTuple):
 
 
 def get_action_and_input(llm_output: str) -> Tuple[str, str]:
-    """Parse out the action and input from the LLM output.
-
-    Note: if you're specifying a custom prompt for the ZeroShotAgent,
-    you will need to ensure that it meets the following Regex requirements.
-    The string starting with "Action:" and the following string starting
-    with "Action Input:" should be separated by a newline.
-    """
-    if FINAL_ANSWER_ACTION in llm_output:
-        return "Final Answer", llm_output.split(FINAL_ANSWER_ACTION)[-1].strip()
-    regex = r"Action: (.*?)\nAction Input: (.*)"
-    match = re.search(regex, llm_output, re.DOTALL)
-    if not match:
-        raise ValueError(f"Could not parse LLM output: `{llm_output}`")
-    action = match.group(1).strip()
-    action_input = match.group(2)
+    """Parse out the action and input from the LLM output."""
+    ps = [p for p in llm_output.split("\n") if p]
+    if ps[-1].startswith("Final Answer"):
+        directive = ps[-1][len(FINAL_ANSWER_ACTION) :]
+        return "Final Answer", directive
+    if not ps[-1].startswith("Action Input: "):
+        raise ValueError(
+            "The last line does not have an action input, "
+            "something has gone terribly wrong."
+        )
+    if not ps[-2].startswith("Action: "):
+        raise ValueError(
+            "The second to last line does not have an action, "
+            "something has gone terribly wrong."
+        )
+    action = ps[-2][len("Action: ") :]
+    action_input = ps[-1][len("Action Input: ") :]
     return action, action_input.strip(" ").strip('"')
 
 
 class ZeroShotAgent(Agent):
     """Agent for the MRKL chain."""
-
-    @property
-    def _agent_type(self) -> str:
-        """Return Identifier of agent type."""
-        return "zero-shot-react-description"
 
     @property
     def observation_prefix(self) -> str:
@@ -72,7 +66,6 @@ class ZeroShotAgent(Agent):
         tools: List[Tool],
         prefix: str = PREFIX,
         suffix: str = SUFFIX,
-        format_instructions: str = FORMAT_INSTRUCTIONS,
         input_variables: Optional[List[str]] = None,
     ) -> PromptTemplate:
         """Create prompt in the style of the zero shot agent.
@@ -89,40 +82,11 @@ class ZeroShotAgent(Agent):
         """
         tool_strings = "\n".join([f"{tool.name}: {tool.description}" for tool in tools])
         tool_names = ", ".join([tool.name for tool in tools])
-        format_instructions = format_instructions.format(tool_names=tool_names)
+        format_instructions = FORMAT_INSTRUCTIONS.format(tool_names=tool_names)
         template = "\n\n".join([prefix, tool_strings, format_instructions, suffix])
         if input_variables is None:
             input_variables = ["input", "agent_scratchpad"]
         return PromptTemplate(template=template, input_variables=input_variables)
-
-    @classmethod
-    def from_llm_and_tools(
-        cls,
-        llm: BaseLLM,
-        tools: List[Tool],
-        callback_manager: Optional[BaseCallbackManager] = None,
-        prefix: str = PREFIX,
-        suffix: str = SUFFIX,
-        format_instructions: str = FORMAT_INSTRUCTIONS,
-        input_variables: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> Agent:
-        """Construct an agent from an LLM and tools."""
-        cls._validate_tools(tools)
-        prompt = cls.create_prompt(
-            tools,
-            prefix=prefix,
-            suffix=suffix,
-            format_instructions=format_instructions,
-            input_variables=input_variables,
-        )
-        llm_chain = LLMChain(
-            llm=llm,
-            prompt=prompt,
-            callback_manager=callback_manager,
-        )
-        tool_names = [tool.name for tool in tools]
-        return cls(llm_chain=llm_chain, allowed_tools=tool_names, **kwargs)
 
     @classmethod
     def _validate_tools(cls, tools: List[Tool]) -> None:
@@ -137,7 +101,7 @@ class ZeroShotAgent(Agent):
         return get_action_and_input(text)
 
 
-class MRKLChain(AgentExecutor):
+class MRKLChain(AgentWithTools):
     """Chain that implements the MRKL system.
 
     Example:
@@ -153,8 +117,8 @@ class MRKLChain(AgentExecutor):
 
     @classmethod
     def from_chains(
-        cls, llm: BaseLLM, chains: List[ChainConfig], **kwargs: Any
-    ) -> AgentExecutor:
+        cls, llm: LLM, chains: List[ChainConfig], **kwargs: Any
+    ) -> AgentWithTools:
         """User friendly way to initialize the MRKL chain.
 
         This is intended to be an easy way to get up and running with the

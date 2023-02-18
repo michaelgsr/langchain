@@ -1,22 +1,16 @@
 """Chain that does self ask with search."""
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple
 
-from langchain.agents.agent import Agent, AgentExecutor
+from langchain.agents.agent import Agent, AgentWithTools
 from langchain.agents.self_ask_with_search.prompt import PROMPT
 from langchain.agents.tools import Tool
-from langchain.llms.base import BaseLLM
+from langchain.llms.base import LLM
 from langchain.prompts.base import BasePromptTemplate
 from langchain.serpapi import SerpAPIWrapper
-from langchain.utilities.google_serper import GoogleSerperAPIWrapper
 
 
 class SelfAskWithSearchAgent(Agent):
     """Agent for the self-ask-with-search paper."""
-
-    @property
-    def _agent_type(self) -> str:
-        """Return Identifier of agent type."""
-        return "self-ask-with-search"
 
     @classmethod
     def create_prompt(cls, tools: List[Tool]) -> BasePromptTemplate:
@@ -69,23 +63,18 @@ class SelfAskWithSearchAgent(Agent):
         return "Are follow up questions needed here:"
 
 
-class SelfAskWithSearchChain(AgentExecutor):
+class SelfAskWithSearchChain(AgentWithTools):
     """Chain that does self ask with search.
 
     Example:
         .. code-block:: python
 
-            from langchain import SelfAskWithSearchChain, OpenAI, GoogleSerperAPIWrapper
-            search_chain = GoogleSerperAPIWrapper()
+            from langchain import SelfAskWithSearchChain, OpenAI, SerpAPIWrapper
+            search_chain = SerpAPIWrapper()
             self_ask = SelfAskWithSearchChain(llm=OpenAI(), search_chain=search_chain)
     """
 
-    def __init__(
-        self,
-        llm: BaseLLM,
-        search_chain: Union[GoogleSerperAPIWrapper, SerpAPIWrapper],
-        **kwargs: Any,
-    ):
+    def __init__(self, llm: LLM, search_chain: SerpAPIWrapper, **kwargs: Any):
         """Initialize with just an LLM and a search chain."""
         search_tool = Tool(name="Intermediate Answer", func=search_chain.run)
         agent = SelfAskWithSearchAgent.from_llm_and_tools(llm, [search_tool])

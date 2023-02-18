@@ -4,23 +4,18 @@ from typing import Any, List, Optional, Tuple
 
 from pydantic import BaseModel
 
-from langchain.agents.agent import Agent, AgentExecutor
+from langchain.agents.agent import Agent, AgentWithTools
 from langchain.agents.react.textworld_prompt import TEXTWORLD_PROMPT
 from langchain.agents.react.wiki_prompt import WIKI_PROMPT
 from langchain.agents.tools import Tool
 from langchain.docstore.base import Docstore
 from langchain.docstore.document import Document
-from langchain.llms.base import BaseLLM
+from langchain.llms.base import LLM
 from langchain.prompts.base import BasePromptTemplate
 
 
 class ReActDocstoreAgent(Agent, BaseModel):
-    """Agent for the ReAct chain."""
-
-    @property
-    def _agent_type(self) -> str:
-        """Return Identifier of agent type."""
-        return "react-docstore"
+    """Agent for the ReAct chin."""
 
     @classmethod
     def create_prompt(cls, tools: List[Tool]) -> BasePromptTemplate:
@@ -71,7 +66,7 @@ class ReActDocstoreAgent(Agent, BaseModel):
 
     @property
     def _stop(self) -> List[str]:
-        return [f"\nObservation {self.i}:"]
+        return [f"\nObservation {self.i}: "]
 
     @property
     def llm_prefix(self) -> str:
@@ -121,7 +116,7 @@ class ReActTextWorldAgent(ReActDocstoreAgent, BaseModel):
             raise ValueError(f"Tool name should be Play, got {tool_names}")
 
 
-class ReActChain(AgentExecutor):
+class ReActChain(AgentWithTools):
     """Chain that implements the ReAct paper.
 
     Example:
@@ -131,7 +126,7 @@ class ReActChain(AgentExecutor):
             react = ReAct(llm=OpenAI())
     """
 
-    def __init__(self, llm: BaseLLM, docstore: Docstore, **kwargs: Any):
+    def __init__(self, llm: LLM, docstore: Docstore, **kwargs: Any):
         """Initialize with the LLM and a docstore."""
         docstore_explorer = DocstoreExplorer(docstore)
         tools = [
